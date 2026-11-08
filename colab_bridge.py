@@ -6,6 +6,7 @@ Supports:
   - auth_status : Check OAuth login state, real CU balance, hourly burn rate, and active VMs
   - auth_url    : Generate Google OAuth2 authorization URL for 1-click browser login
   - auth_code   : Exchange Google authorization code and save ~/.config/colab-cli/token.json
+  - drive_configure / drive_status : Configure account-specific Drive quota project and verify access
   - wake        : Provision/reuse Colab GPU VM (G4/H100/A100/L4/T4), deploy app.py, and return gradio.live URL
   - keepalive   : Refresh Colab runtime proxy & kernel activity while active
   - stop_all    : Unassign and terminate all active Colab VMs on the account (verify 0 CU/hr burn)
@@ -94,6 +95,7 @@ def _has_valid_token() -> bool:
 
 PKCE_VERIFIER_PATH = os.path.expanduser("~/.config/colab-cli/pkce_verifier.txt")
 ACCOUNT_PROFILE_CACHE_PATH = os.path.expanduser("~/.config/colab-cli/account_profile.json")
+DRIVE_CONFIG_PATH = os.path.expanduser("~/.config/colab-cli/drive_config.json")
 
 
 def _clear_local_session_store():
@@ -242,6 +244,98 @@ def cmd_auth_status():
             "email": _get_account_email(),
             "error": str(e),
         }))
+
+
+def _get_drive_quota_project() -> str:
+    """Keep Drive settings separate from token.json, which Colab CLI rewrites on refresh."""
+    override = os.environ.get("GOOGLE_CLOUD_QUOTA_PROJECT", "").strip()
+    if override:
+        return override
+    email = _get_account_email()
+    if email and os.path.exists(DRIVE_CONFIG_PATH):
+        with open(DRIVE_CONFIG_PATH, encoding="utf-8") as f:
+            project = json.load(f).get("accounts", {}).get(email, "")
+        if project:
+            return str(project)
+    if os.path.exists(TOKEN_CONFIG_PATH):
+        with open(TOKEN_CONFIG_PATH, encoding="utf-8") as f:
+            return str(json.load(f).get("quota_project_id") or "")
+    return ""
+
+
+def _probe_drive(quota_project: str) -> dict:
+    creds = Credentials.from_authorized_user_file(TOKEN_CONFIG_PATH, PUBLIC_SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    headers = {"Authorization": f"Bearer {creds.token}"}
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
+    response = requests.get(
+        "https://www.googleapis.com/drive/v3/about",
+        headers=headers,
+        params={"fields": "user(emailAddress),storageQuota"},
+        timeout=20,
+    )
+    data = response.json()
+    if response.status_code != 200:
+        return {"ok": False, "quota_project": quota_project, "http_status": response.status_code,
+                "error": data.get("error", {}).get("message", "Google Drive request failed")}
+    return {"ok": True, "quota_project": quota_project,
+            "email": data.get("user", {}).get("emailAddress", ""),
+            "storage_quota": data.get("storageQuota", {})}
+
+
+def cmd_drive_status():
+    try:
+        print(json.dumps(_probe_drive(_get_drive_quota_project())))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def cmd_drive_configure(quota_project: str):
+    """Only persist a quota project after Drive verifies this account can use it."""
+    try:
+        result = _probe_drive(quota_project)
+        if result["ok"]:
+            email = result["email"]
+            if not email:
+                raise ValueError("Google Drive did not return the authenticated account")
+            config = {}
+            if os.path.exists(DRIVE_CONFIG_PATH):
+                with open(DRIVE_CONFIG_PATH, encoding="utf-8") as f:
+                    config = json.load(f)
+            config.setdefault("accounts", {})[email] = quota_project
+            import tempfile
+            config_dir = os.path.dirname(os.path.abspath(DRIVE_CONFIG_PATH))
+            os.makedirs(config_dir, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".drive_config_", dir=config_dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(config, f)
+                os.replace(temporary, DRIVE_CONFIG_PATH)
+            finally:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+        print(json.dumps(result))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def _with_drive_quota_project(boot_code: str, quota_project: str) -> str:
+    """Supply rclone's supported --header setting to bootstrap and server children."""
+    return (
+        "import os, csv, io\n"
+        "easycolab_drive_env = os.environ.copy()\n"
+        f"easycolab_quota_project = {json.dumps(quota_project)}\n"
+        "if easycolab_quota_project:\n"
+        "    easycolab_headers = next(csv.reader([easycolab_drive_env.get('RCLONE_HEADER', '')]))\n"
+        "    easycolab_headers = [h for h in easycolab_headers if h.split(':', 1)[0].strip().lower() != 'x-goog-user-project']\n"
+        "    easycolab_headers.append('x-goog-user-project: ' + easycolab_quota_project)\n"
+        "    easycolab_header_csv = io.StringIO()\n"
+        "    csv.writer(easycolab_header_csv, lineterminator='').writerow(easycolab_headers)\n"
+        "    easycolab_drive_env['RCLONE_HEADER'] = easycolab_header_csv.getvalue()\n"
+        + boot_code
+    )
 
 
 def _build_rclone_drive_conf() -> str:
@@ -552,7 +646,7 @@ if os.path.exists(os.path.expanduser("~/.config/rclone/rclone.conf")):
             check=False,
         )
     if shutil.which("rclone") and not os.path.ismount("/content/drive/MyDrive"):
-        subprocess.run(["rclone", "mkdir", "easycolab_gdrive:EasyColab_Drive"], check=False)
+        subprocess.run(["rclone", "mkdir", "easycolab_gdrive:EasyColab_Drive"], check=True, env=easycolab_drive_env)
         if os.path.exists("/dev/fuse") and (shutil.which("fusermount3") or shutil.which("fusermount")):
             os.makedirs("/content/drive/MyDrive", exist_ok=True)
             subprocess.Popen(
@@ -567,6 +661,7 @@ if os.path.exists(os.path.expanduser("~/.config/rclone/rclone.conf")):
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=easycolab_drive_env,
             )
             for _ in range(10):
                 if os.path.ismount("/content/drive/MyDrive"):
@@ -608,7 +703,7 @@ if os.path.exists(log_path):
     os.remove(log_path)
 
 with open(log_path, "w") as out_f:
-    subprocess.Popen([sys.executable, "-u", "/content/app.py"], cwd="/content", stdout=out_f, stderr=subprocess.STDOUT)
+    subprocess.Popen([sys.executable, "-u", "/content/app.py"], cwd="/content", stdout=out_f, stderr=subprocess.STDOUT, env=easycolab_drive_env)
 
 url_re = re.compile(r"https://[a-zA-Z0-9.-]+\.gradio\.live")
 found_url = None
@@ -627,6 +722,8 @@ else:
     tail = open(log_path, "r", errors="replace").read()[-600:] if os.path.exists(log_path) else "no log"
     print("WAKE_ERROR: 启动超时，日志尾部: " + tail, flush=True)
 """
+        boot_code = _with_drive_quota_project(boot_code, _get_drive_quota_project())
+
         def _on_kid(kid):
             target_session.kernel_id = kid
             state.store.add(target_session)
@@ -792,6 +889,9 @@ def main(argv=None):
     sub.add_parser("auth_status")
     sub.add_parser("auth_url")
     sub.add_parser("auth_logout")
+    sub.add_parser("drive_status")
+    p_drive = sub.add_parser("drive_configure")
+    p_drive.add_argument("--quota-project", required=True)
 
     p_code = sub.add_parser("auth_code")
     p_code.add_argument("code", type=str)
@@ -816,6 +916,10 @@ def main(argv=None):
         cmd_auth_logout()
     elif args.cmd == "auth_code":
         cmd_auth_code(args.code)
+    elif args.cmd == "drive_status":
+        cmd_drive_status()
+    elif args.cmd == "drive_configure":
+        cmd_drive_configure(args.quota_project)
     elif args.cmd == "wake":
         cmd_wake(args.gpu, args.app_py)
     elif args.cmd == "keepalive":

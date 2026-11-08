@@ -113,6 +113,40 @@ python windows_app/easycolab_win.py
 
 ---
 
+## Google Drive API 配额项目配置
+
+若桌面端自动挂载 / 同步 Drive 时出现 `403 accessNotConfigured` 或
+`requires a quota project`，请在与 Colab 相同的 Google 账号下选择一个自己有权限的
+Google Cloud 项目，启用 **Google Drive API**。该账号需要项目的
+`serviceusage.services.use` 权限。然后在本地桥接 Python 环境执行：
+
+```bash
+python colab_bridge.py drive_configure --quota-project YOUR_PROJECT_ID
+python colab_bridge.py drive_status
+```
+
+macOS 自动安装的桥接 Python 位于
+`~/Library/Application Support/EasyColab/venv/bin/python`；使用打包应用时，脚本位于
+`EasyColab.app/Contents/Resources/colab_bridge.py`。
+Windows 打包版可执行 `EasyColab.exe --bridge-cli drive_configure --quota-project YOUR_PROJECT_ID`，
+以及 `EasyColab.exe --bridge-cli drive_status`。
+
+配置命令先读取 Drive 的账号和存储配额，只有成功后才将项目写入
+`~/.config/colab-cli/drive_config.json`。配置按 Google 账号分别保存，不会给另一个账号
+沿用同一项目，也不依赖会被 Colab CLI 刷新重写的 `token.json`。
+`GOOGLE_CLOUD_QUOTA_PROJECT` 环境变量可覆盖已保存配置；已有凭据中的
+`quota_project_id` 也可作为后备。
+
+下次唤醒时，桥接会通过 rclone 的 `RCLONE_HEADER` 设置传递
+`x-goog-user-project`，覆盖初始建目录、挂载及服务进程中的后续同步。
+配置命令不会启用 API、修改 IAM 或计费设置，也不会启动 GPU。
+
+此配置解决 API 403；原生模型仍需要实际 Drive 挂载才能持久化，无 FUSE 时的
+ComfyUI rclone 镜像模式不等于原生 H3 的模型与输出已经备份。
+
+参考：[Google 配额项目配置](https://docs.cloud.google.com/docs/quotas/set-quota-project)、
+[rclone 环境变量](https://rclone.org/docs/#environment-variables)。
+
 ## 隐私与安全建议
 
 1. **录屏 / 截图防泄密开关**：在左侧「服务地址」输入框旁提供了 **打码保护开关**（macOS 为眼睛图标，Windows 为「打码」按钮）。在录制教程、直播或截图分享前，请开启打码隐藏你的 `*.gradio.live` 与 `*.trycloudflare.com` 临时公网隧道域名及账号邮箱，防止他人通过链接蹭用你的云端 GPU。

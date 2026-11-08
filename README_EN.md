@@ -106,6 +106,39 @@ python windows_app/easycolab_win.py
 
 ---
 
+## Google Drive API quota project
+
+If automatic Drive mounting or syncing returns `403 accessNotConfigured` or
+`requires a quota project`, enable **Google Drive API** in a Google Cloud project
+that the same Colab account can use. The account needs `serviceusage.services.use`
+on that project. Then run these commands with the bridge Python environment:
+
+```bash
+python colab_bridge.py drive_configure --quota-project YOUR_PROJECT_ID
+python colab_bridge.py drive_status
+```
+
+On macOS, the managed Python is at
+`~/Library/Application Support/EasyColab/venv/bin/python`; a packaged app contains
+the script at `EasyColab.app/Contents/Resources/colab_bridge.py`.
+Packaged Windows users can run
+`EasyColab.exe --bridge-cli drive_configure --quota-project YOUR_PROJECT_ID`
+and `EasyColab.exe --bridge-cli drive_status`.
+
+Configuration is saved only after a successful Drive probe, separately for each
+Google account in `~/.config/colab-cli/drive_config.json`. It survives token-file
+refreshes. `GOOGLE_CLOUD_QUOTA_PROJECT` overrides the saved setting; a credential's
+existing `quota_project_id` is supported as a fallback. The next wake supplies
+`x-goog-user-project` through rclone's `RCLONE_HEADER` for bootstrap, mounting and
+subsequent server sync processes. These commands do not enable APIs, change IAM
+or billing settings, or start a GPU.
+
+This fixes API authorization; native H3 persistence still requires a real Drive
+mount. ComfyUI's rclone mirror fallback does not back up native H3 data.
+
+See [Google quota projects](https://docs.cloud.google.com/docs/quotas/set-quota-project)
+and [rclone environment variables](https://rclone.org/docs/#environment-variables).
+
 ## Privacy & Security Best Practices
 
 1. **Screen-Recording / Screenshot Redaction Mode**: Next to the **Server URL** input in the left sidebar, toggle **Redact / Mask Mode** (eye icon on macOS, **Mask** button on Windows) before recording tutorials, streaming, or sharing screenshots. This masks your temporary `*.gradio.live` and `*.trycloudflare.com` tunnel URLs as well as your Google account email so others cannot access your cloud GPU.
